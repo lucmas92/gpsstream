@@ -6,7 +6,7 @@ const error = ref(null)
 const loading = ref(false)
 const history = ref([])
 const isTracking = ref(false)
-const intervalId = ref(null)
+const watchId = ref(null)
 const message = ref('')
 
 // Funzione per calcolare la distanza tra due punti GPS (formula Haversine)
@@ -21,6 +21,70 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c
 }
 
+// Funzione per elaborare la posizione ricevuta
+async function processLocation(pos) {
+  const timestamp = new Date(pos.timestamp)
+  const data = {
+    userId: "user_001",
+    latitude: pos.coords.latitude,
+    longitude: pos.coords.longitude,
+    accuracy: pos.coords.accuracy,
+    altitude: pos.coords.altitude,
+    timestamp: timestamp.toISOString()
+  }
+
+  location.value = data
+  loading.value = false
+
+  // Controlla se le coordinate sono diverse dall'ultima posizione
+  const isDifferent = history.value.length === 0 ||
+    Math.abs(data.latitude - history.value[history.value.length - 1].latitude) >= 0.0001 ||
+    Math.abs(data.longitude - history.value[history.value.length - 1].longitude) >= 0.0001
+
+  if (!isDifferent) {
+    message.value = "Coordinate invariate, nessuna nuova posizione aggiunta."
+    return
+  }
+
+  message.value = ''
+
+  // Calcola velocità se c'è una posizione precedente
+  let speed = 0
+  if (history.value.length > 0) {
+    const prev = history.value[history.value.length - 1]
+    const distance = getDistance(prev.latitude, prev.longitude, data.latitude, data.longitude)
+    const deltaTime = (timestamp - new Date(prev.timestamp)) / 1000 / 3600 // ore
+    speed = deltaTime > 0 ? distance / deltaTime : 0 // km/h
+  }
+
+  // Aggiungi alla history
+  history.value.push({
+    latitude: data.latitude,
+    longitude: data.longitude,
+    timestamp: data.timestamp,
+    speed: speed.toFixed(2)
+  })
+
+  // Mantieni solo le ultime 20 posizioni
+  if (history.value.length > 20) {
+    history.value.shift()
+  }
+
+  // 👉 invio backend
+  try {
+    await fetch("https://gpsstream.shop/service/trigger/gps", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY":"chiave"
+      },
+      body: JSON.stringify(data)
+    })
+  } catch (e) {
+    console.error("Errore invio:", e)
+  }
+}
+
 async function getLocation() {
   if (!navigator.geolocation) {
     error.value = "Geolocalizzazione non supportata"
@@ -31,68 +95,7 @@ async function getLocation() {
   error.value = null
 
   navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const timestamp = new Date(pos.timestamp)
-        const data = {
-          userId: "user_001",
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
-          altitude: pos.coords.altitude,
-          timestamp: timestamp.toISOString()
-        }
-
-        location.value = data
-        loading.value = false
-
-        // Controlla se le coordinate sono diverse dall'ultima posizione
-        const isDifferent = history.value.length === 0 ||
-          Math.abs(data.latitude - history.value[history.value.length - 1].latitude) >= 0.0001 ||
-          Math.abs(data.longitude - history.value[history.value.length - 1].longitude) >= 0.0001
-
-        if (!isDifferent) {
-          message.value = "Coordinate invariate, nessuna nuova posizione aggiunta."
-          return
-        }
-
-        message.value = ''
-
-        // Calcola velocità se c'è una posizione precedente
-        let speed = 0
-        if (history.value.length > 0) {
-          const prev = history.value[history.value.length - 1]
-          const distance = getDistance(prev.latitude, prev.longitude, data.latitude, data.longitude)
-          const deltaTime = (timestamp - new Date(prev.timestamp)) / 1000 / 3600 // ore
-          speed = deltaTime > 0 ? distance / deltaTime : 0 // km/h
-        }
-
-        // Aggiungi alla history
-        history.value.push({
-          latitude: data.latitude,
-          longitude: data.longitude,
-          timestamp: data.timestamp,
-          speed: speed.toFixed(2)
-        })
-
-        // Mantieni solo le ultime 20 posizioni
-        if (history.value.length > 20) {
-          history.value.shift()
-        }
-
-        // 👉 invio backend
-        try {
-          await fetch("https://gpsstream.shop/service/trigger/gps", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-API-KEY":"chiave"
-            },
-            body: JSON.stringify(data)
-          })
-        } catch (e) {
-          console.error("Errore invio:", e)
-        }
-      },
+      processLocation,
       (err) => {
         error.value = err.message
         loading.value = false
@@ -104,14 +107,23 @@ function startTracking() {
   if (isTracking.value) return
   isTracking.value = true
   getLocation() // Prima posizione immediata
-  intervalId.value = setInterval(getLocation, 5000) // Ogni 2 secondi
+  watchId.value = navigator.geolocation.watchPosition(processLocation, (err) => {
+    error.value = err.message
+    loading.value = false
+  }, {
+    enableHighAccuracy: true,
+    maximumAge: 10000,
+    timeout: 5000
+  })
 }
 
 function stopTracking() {
   if (!isTracking.value) return
   isTracking.value = false
-  clearInterval(intervalId.value)
-  intervalId.value = null
+  if (watchId.value !== null) {
+    navigator.geolocation.clearWatch(watchId.value)
+    watchId.value = null
+  }
 }
 </script>
 
@@ -129,7 +141,7 @@ function stopTracking() {
     <p v-if="error" style="color:red;">
       Errore: {{ error }}
     </p>
-    <p v-if="message" style="color:blue;">
+    <p v-if="message" style="color:rgb(0 245 227);">
       {{ message }}
     </p>
 
