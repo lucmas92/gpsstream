@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 
 const location = ref(null)
 const error = ref(null)
@@ -8,6 +8,7 @@ const history = ref([])
 const isTracking = ref(false)
 const watchId = ref(null)
 const message = ref('')
+const lastSendTime = ref(0)
 
 // Funzione per calcolare la distanza tra due punti GPS (formula Haversine)
 function getDistance(lat1, lon1, lat2, lon2) {
@@ -23,6 +24,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
 
 // Funzione per elaborare la posizione ricevuta
 async function processLocation(pos) {
+  console.log('processLocation', pos)
   const timestamp = new Date(pos.timestamp)
   const data = {
     userId: "user_001",
@@ -33,41 +35,21 @@ async function processLocation(pos) {
     timestamp: timestamp.toISOString()
   }
 
+  // Verifica se la posizione è cambiata significativamente
+  if (location.value && location.value.latitude === data.latitude && location.value.longitude === data.longitude) {
+    message.value = 'Posizione non cambiata'
+    return
+  } else {
+    message.value = ''
+  }
+
   location.value = data
   loading.value = false
 
-  // Controlla se le coordinate sono diverse dall'ultima posizione
-  const isDifferent = history.value.length === 0 ||
-    Math.abs(data.latitude - history.value[history.value.length - 1].latitude) >= 0.0001 ||
-    Math.abs(data.longitude - history.value[history.value.length - 1].longitude) >= 0.0001
-
-  if (!isDifferent) {
-    message.value = "Coordinate invariate, nessuna nuova posizione aggiunta."
+  // Controllo frequenza invio: al massimo 1 ogni 2 secondi
+  if (Date.now() - lastSendTime.value < 2000) {
+    message.value = 'Invio troppo frequente, attendi'
     return
-  }
-
-  message.value = ''
-
-  // Calcola velocità se c'è una posizione precedente
-  let speed = 0
-  if (history.value.length > 0) {
-    const prev = history.value[history.value.length - 1]
-    const distance = getDistance(prev.latitude, prev.longitude, data.latitude, data.longitude)
-    const deltaTime = (timestamp - new Date(prev.timestamp)) / 1000 / 3600 // ore
-    speed = deltaTime > 0 ? distance / deltaTime : 0 // km/h
-  }
-
-  // Aggiungi alla history
-  history.value.push({
-    latitude: data.latitude,
-    longitude: data.longitude,
-    timestamp: data.timestamp,
-    speed: speed.toFixed(2)
-  })
-
-  // Mantieni solo le ultime 20 posizioni
-  if (history.value.length > 20) {
-    history.value.shift()
   }
 
   // 👉 invio backend
@@ -80,6 +62,9 @@ async function processLocation(pos) {
       },
       body: JSON.stringify(data)
     })
+    lastSendTime.value = Date.now()
+    // Dopo l'invio, aggiorna lo storico
+    await fetchHistory()
   } catch (e) {
     console.error("Errore invio:", e)
   }
@@ -101,6 +86,47 @@ async function getLocation() {
         loading.value = false
       }
   )
+}
+
+// Funzione per recuperare lo storico dal server
+async function fetchHistory() {
+  try {
+    const response = await fetch("https://gpsstream.shop/service/get-gps", {
+      method: "GET",
+      headers: {
+        "X-API-KEY":"chiave"
+      },
+    })
+
+    if (!response.ok) throw new Error('Errore nel recupero dello storico')
+    const data = await response.json()
+    // Ordina per timestamp decrescente (più recenti prima)
+    const sortedData = data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+
+    // Calcola velocità per ogni posizione
+    for (let i = 0; i < sortedData.length; i++) {
+      if (i > 0) {
+        const prev = sortedData[i - 1]
+        const curr = sortedData[i]
+        const distance = getDistance(prev.latitude, prev.longitude, curr.latitude, curr.longitude)
+        const deltaTime = (new Date(prev.timestamp) - new Date(curr.timestamp)) / 1000 / 3600 // ore
+        sortedData[i].speed = deltaTime > 0 ? (distance / deltaTime).toFixed(2) : 0
+      } else {
+        sortedData[i].speed = 0 // Prima posizione, velocità 0
+      }
+    }
+
+    history.value = sortedData
+  } catch (e) {
+    console.error("Errore recupero storico:", e)
+    error.value = "Errore nel recupero dello storico"
+  }
+}
+
+// Funzione per formattare il timestamp in data e ora locali
+function formatTimestamp(ts) {
+  const date = new Date(ts)
+  return date.toLocaleString()
 }
 
 function startTracking() {
@@ -125,6 +151,11 @@ function stopTracking() {
     watchId.value = null
   }
 }
+
+// Carica lo storico al montaggio del componente
+onMounted(() => {
+  fetchHistory()
+})
 </script>
 
 <template>
@@ -141,7 +172,7 @@ function stopTracking() {
     <p v-if="error" style="color:red;">
       Errore: {{ error }}
     </p>
-    <p v-if="message" style="color:rgb(0 245 227);">
+    <p v-if="message" style="color:blue;">
       {{ message }}
     </p>
 
@@ -153,15 +184,17 @@ function stopTracking() {
             <th style="border:1px solid black; padding:8px;">Timestamp</th>
             <th style="border:1px solid black; padding:8px;">Latitudine</th>
             <th style="border:1px solid black; padding:8px;">Longitudine</th>
+            <th style="border:1px solid black; padding:8px;">Precisione</th>
             <th style="border:1px solid black; padding:8px;">Velocità (km/h)</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(pos, index) in history.slice().reverse()" :key="index">
-            <td style="border:1px solid black; padding:8px;">{{ pos.timestamp }}</td>
+          <tr v-for="pos in history" :key="pos.id">
+            <td style="border:1px solid black; padding:8px;">{{ formatTimestamp(pos.timestamp) }}</td>
             <td style="border:1px solid black; padding:8px;">{{ pos.latitude.toFixed(6) }}</td>
             <td style="border:1px solid black; padding:8px;">{{ pos.longitude.toFixed(6) }}</td>
-            <td style="border:1px solid black; padding:8px;">{{ pos.speed }}</td>
+            <td style="border:1px solid black; padding:8px;">{{ pos.accuracy.toFixed(2) }} m</td>
+            <td style="border:1px solid black; padding:8px;">{{ pos.speed }} km/h</td>
           </tr>
         </tbody>
       </table>
